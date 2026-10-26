@@ -1,0 +1,247 @@
+id: spring-kryo-deserialization-gadget
+
+info:
+  name: Spring Kryo Deserialization Gadget Detection (BeanFactory Chain)
+  author: Rin Le from Secuwall (trinhtu.kma@gmail.com)
+  severity: high
+  description: |
+    Detects endpoints vulnerable to RCE via Kryo deserialization of
+    Spring BeanFactory gadget classes (Chain 3).
+
+    Kryo with registrationRequired=false deserializes arbitrary classes
+    using Unsafe.allocateInstance() + FieldSerializer, bypassing ALL
+    constructors, setters, and validation (including Assert.notNull).
+
+    Detection strategy (status-code differential, no response body dependency):
+      Phase 1 — Kryo probe: send valid Kryo Integer → expect 200
+      Phase 2 — Gadget A: send SimpleBeanTargetSource → expect 200
+      Phase 3 — Gadget B: send SimpleBeanFactoryAwareAspectInstanceFactory → expect 200
+
+    Payloads cover both Kryo 4.x and 5.x wire formats (incompatible
+    with each other). Integer probe is identical across versions.
+    Gadget payloads differ due to changed string/field encoding.
+    Each phase sends both versions — the matching one triggers.
+
+    Kryo version coverage:
+      4.x (4.0.0–4.0.3) — Apache Spark, Hazelcast, Akka (older)
+      5.x (5.0–5.7+)     — Modern Spring Boot apps
+
+    Unlike Jackson, Kryo has no denylist — if registrationRequired=false,
+    ALL classes are accepted. The vulnerability requires:
+      - Kryo on classpath with registrationRequired=false
+      - spring-aop on classpath (default in Spring Boot)
+      - Endpoint deserializes untrusted Kryo data
+  impact: |
+    Remote Code Execution. Kryo injects an attacker-controlled
+    BeanFactory directly into the beanFactory field via reflection,
+    bypassing all setter validation. When application code calls
+    getTarget() or getOrder(), the malicious BeanFactory executes
+    arbitrary commands via getBean().
+  classification:
+    cwe-id: CWE-502
+    cvss-score: 8.1
+    cvss-metrics: CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H
+  tags: spring,kryo,deserialization,rce,gadget
+  metadata:
+    max-request: 10
+
+# ┌──────────────────────────────────────────────────────────────┐
+# │ Payload hex reference                                        │
+# │                                                              │
+# │ Integer(1) — same for 4.x and 5.x:                          │
+# │   0202                                                       │
+# │                                                              │
+# │ SimpleBeanTargetSource(targetBeanName="kryo-gadget-test"):   │
+# │   5.x: 01006f72672e737072696e676672616d65776f726b2e616f70    │
+# │        2e7461726765742e53696d706c654265616e5461726765745      │
+# │        36f757263e5006b72796f2d6761646765742d746573f400        │
+# │   4.x: 01006f72672e737072696e676672616d65776f726b2e616f70    │
+# │        2e7461726765742e53696d706c654265616e5461726765745      │
+# │        36f757263e50100016b72796f2d6761646765742d746573f400    │
+# │                                                              │
+# │ SimpleBeanFactoryAwareAspectInstanceFactory                  │
+# │   (aspectBeanName="kryo-gadget-test"):                       │
+# │   5.x: 01006f72672e737072696e676672616d65776f726b2e616f70    │
+# │        2e636f6e6669672e53696d706c654265616e466163746f72794    │
+# │        177617265417370656374496e7374616e6365466163746f72f9    │
+# │        6b72796f2d6761646765742d746573f400                    │
+# │   4.x: 0100cb016f72672e737072696e676672616d65776f726b2e61    │
+# │        6f702e636f6e6669672e53696d706c654265616e466163746f    │
+# │        72794177617265417370656374496e7374616e63654661637      │
+# │        46f727901016b72796f2d6761646765742d746573f400          │
+# └──────────────────────────────────────────────────────────────┘
+
+http:
+  # ══════════════════════════════════════════════════════════════
+  # Phase 1: Confirm Kryo deserialization endpoint
+  #
+  # Integer(1) = 0x0202 — identical for Kryo 4.x and 5.x.
+  # If the endpoint deserializes Kryo data, it returns 200.
+  # ══════════════════════════════════════════════════════════════
+
+  # 1A — Raw binary
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/octet-stream
+        Accept: */*
+
+        {{hex_decode('0202')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 1B — Base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        AgI=
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # ══════════════════════════════════════════════════════════════
+  # Phase 2: Gadget A — SimpleBeanTargetSource
+  #
+  # targetBeanName="kryo-gadget-test", beanFactory=null.
+  # If accepted (200), Kryo instantiated the gadget class and
+  # set fields via Unsafe + reflection.
+  # ══════════════════════════════════════════════════════════════
+
+  # 2A — Kryo 5.x raw binary (73 bytes)
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/octet-stream
+        Accept: */*
+
+        {{hex_decode('01006f72672e737072696e676672616d65776f726b2e616f702e7461726765742e53696d706c654265616e546172676574536f757263e5006b72796f2d6761646765742d746573f400')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 2B — Kryo 5.x base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        AQBvcmcuc3ByaW5nZnJhbWV3b3JrLmFvcC50YXJnZXQuU2ltcGxlQmVhblRhcmdldFNvdXJj5QBrcnlvLWdhZGdldC10ZXP0AA==
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 2C — Kryo 4.x raw binary (75 bytes)
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/octet-stream
+        Accept: */*
+
+        {{hex_decode('01006f72672e737072696e676672616d65776f726b2e616f702e7461726765742e53696d706c654265616e546172676574536f757263e50100016b72796f2d6761646765742d746573f400')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 2D — Kryo 4.x base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        AQBvcmcuc3ByaW5nZnJhbWV3b3JrLmFvcC50YXJnZXQuU2ltcGxlQmVhblRhcmdldFNvdXJj5QEAAWtyeW8tZ2FkZ2V0LXRlc/QA
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # ══════════════════════════════════════════════════════════════
+  # Phase 3: Gadget B — SimpleBeanFactoryAwareAspectInstanceFactory
+  #
+  # aspectBeanName="kryo-gadget-test", beanFactory=null.
+  # Same attack vector via getOrder() → getBean().
+  # ══════════════════════════════════════════════════════════════
+
+  # 3A — Kryo 5.x raw binary (93 bytes)
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/octet-stream
+        Accept: */*
+
+        {{hex_decode('01006f72672e737072696e676672616d65776f726b2e616f702e636f6e6669672e53696d706c654265616e466163746f72794177617265417370656374496e7374616e6365466163746f72f96b72796f2d6761646765742d746573f400')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 3B — Kryo 5.x base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        AQBvcmcuc3ByaW5nZnJhbWV3b3JrLmFvcC5jb25maWcuU2ltcGxlQmVhbkZhY3RvcnlBd2FyZUFzcGVjdEluc3RhbmNlRmFjdG9y+WtyeW8tZ2FkZ2V0LXRlc/QA
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 3C — Kryo 4.x raw binary (97 bytes)
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: application/octet-stream
+        Accept: */*
+
+        {{hex_decode('0100cb016f72672e737072696e676672616d65776f726b2e616f702e636f6e6669672e53696d706c654265616e466163746f72794177617265417370656374496e7374616e6365466163746f727901016b72796f2d6761646765742d746573f400')}}
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+  # 3D — Kryo 4.x base64
+  - raw:
+      - |
+        POST {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Content-Type: text/plain
+        Accept: */*
+
+        AQDLAW9yZy5zcHJpbmdmcmFtZXdvcmsuYW9wLmNvbmZpZy5TaW1wbGVCZWFuRmFjdG9yeUF3YXJlQXNwZWN0SW5zdGFuY2VGYWN0b3J5AQFrcnlvLWdhZGdldC10ZXP0AA==
+
+    matchers:
+      - type: status
+        status:
+          - 200
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/projectdiscovery/nuclei/master/nuclei-jsonschema.json

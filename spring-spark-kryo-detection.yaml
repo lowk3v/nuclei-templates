@@ -1,0 +1,156 @@
+id: spring-spark-kryo-deserialization-detection
+
+info:
+  name: Apache Spark - Unsafe Kryo Deserialization Detection (Spring Gadget)
+  author: Rin Le from Secuwall (trinhtu.kma@gmail.com)
+  severity: high
+  description: |
+    Detects Apache Spark instances with unsafe Kryo serialization
+    configuration (Chain 3 of the Spring BeanFactory gadget chain).
+
+    Spark uses Kryo with registrationRequired=false by default,
+    allowing deserialization of arbitrary classes. Combined with
+    Spring Framework on the classpath, an attacker who can submit jobs
+    or inject shuffle data can achieve RCE via the
+    SimpleBeanTargetSource / SimpleBeanFactoryAwareAspectInstanceFactory
+    gadget chain.
+
+    Kryo bypasses ALL validation:
+      - No Serializable requirement
+      - No constructor/setter calls (Unsafe.allocateInstance)
+      - No Assert.notNull() guards
+      - Direct field injection via reflection
+
+    This template detects exposed Spark services and checks
+    configuration for unsafe Kryo settings.
+  classification:
+    cwe-id: CWE-502
+    cvss-score: 8.1
+    cvss-metrics: CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H
+  tags: spark,kryo,deserialization,rce,spring,detection
+  metadata:
+    max-request: 5
+
+http:
+  # ──────────────────────────────────────────────────────────────
+  # Detect Spark Web UI and REST API
+  # ──────────────────────────────────────────────────────────────
+
+  # Check 1: Spark Master Web UI (default port 8080)
+  - raw:
+      - |
+        GET {{BaseURL}} HTTP/1.1
+        Host: {{Hostname}}
+        Accept: text/html
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Spark Master"
+          - "spark-logo"
+          - "Running Applications"
+        condition: or
+
+      - type: status
+        status:
+          - 200
+
+  # Check 2: Spark Application UI (default port 4040)
+  - raw:
+      - |
+        GET {{BaseURL}}/api/v1/applications HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "\"id\""
+          - "\"name\""
+          - "\"attempts\""
+        condition: and
+
+      - type: status
+        status:
+          - 200
+
+  # Check 3: Spark environment — check Kryo config
+  # /api/v1/applications/{appId}/environment exposes spark.kryo.*
+  - raw:
+      - |
+        GET {{BaseURL}}/api/v1/applications/ HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+
+      - type: word
+        part: body
+        words:
+          - "\"id\""
+
+    extractors:
+      - type: json
+        part: body
+        json:
+          - ".[0].id"
+        internal: true
+        name: appid
+
+  # Check 4: Get environment config for first app
+  - raw:
+      - |
+        GET {{BaseURL}}/api/v1/applications/{{appid}}/environment HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+
+      - type: word
+        part: body
+        words:
+          - "sparkProperties"
+
+    extractors:
+      - type: regex
+        part: body
+        regex:
+          - "spark\\.serializer[\"\\s:,]+[\"]*([^\"]+)"
+          - "spark\\.kryo\\.registrationRequired[\"\\s:,]+[\"]*([^\"]+)"
+          - "spark\\.kryo\\.unsafe[\"\\s:,]+[\"]*([^\"]+)"
+        group: 1
+
+  # Check 5: Spark Master REST API — submit endpoint detection
+  # If /v1/submissions/status is accessible, job submission may be open
+  - raw:
+      - |
+        GET {{BaseURL}}/v1/submissions/status/driver-0 HTTP/1.1
+        Host: {{Hostname}}
+        Accept: application/json
+
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+          - 400
+
+      - type: word
+        part: body
+        words:
+          - "submissionId"
+          - "serverSparkVersion"
+          - "action"
+        condition: or
